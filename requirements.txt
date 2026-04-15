@@ -1,0 +1,8 @@
+streamlit
+wfdb
+numpy
+scipy
+scikit-learn
+pandas
+plotly
+pywavelets
