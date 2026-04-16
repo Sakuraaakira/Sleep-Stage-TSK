@@ -118,51 +118,76 @@ def calculate_sleep_score(stages):
 # --- 5. 主程序界面 ---
 def main():
     st.sidebar.title("🌙 睡眠数据中心")
-
+    
     if 'analysis_results' not in st.session_state:
         st.session_state.analysis_results = None
 
+    # 加载/训练模型
     model = get_trained_model()
-
+    
     st.sidebar.divider()
-    st.sidebar.subheader("上传待分析数据")
-    hea_file = st.sidebar.file_uploader("上传 .hea 文件", type=['hea'])
-    dat_file = st.sidebar.file_uploader("上传 .dat 文件", type=['dat'])
+    
+    # --- 关键部分：在这里增加了数据来源选择 ---
+    data_source = st.sidebar.radio("选择数据来源", ["使用系统示例", "上传本地文件"])
+    
+    target_record = None
+    target_dir = "data" # 默认指向项目里的 data 文件夹
+    
+    if data_source == "使用系统示例":
+        # 这里的名字必须和你 GitHub data 文件夹里的文件名对应
+        sample_list = ['slp01a', 'slp01b', 'slp02a', 'slp67x'] 
+        selected_sample = st.sidebar.selectbox("选择一个受试者记录", sample_list)
+        if st.sidebar.button("分析该示例", type="primary"):
+            target_record = selected_sample 
+            
+    else: # 上传模式
+        hea_file = st.sidebar.file_uploader("上传 .hea 文件", type=['hea'])
+        dat_file = st.sidebar.file_uploader("上传 .dat 文件", type=['dat'])
+        if hea_file and dat_file:
+            if st.sidebar.button("开始分析上传数据", type="primary"):
+                hb = hea_file.name.split('.')[0]
+                db = dat_file.name.split('.')[0]
+                if hb != db:
+                    st.error("❌ 错误：文件名不匹配！")
+                else:
+                    tmpdir = tempfile.mkdtemp()
+                    with open(os.path.join(tmpdir, hea_file.name), "wb") as f: f.write(hea_file.getbuffer())
+                    with open(os.path.join(tmpdir, dat_file.name), "wb") as f: f.write(dat_file.getbuffer())
+                    target_record = hb
+                    target_dir = tmpdir
 
-    if hea_file and dat_file:
-        if st.sidebar.button("开始分析报告", type="primary"):
-            hb, db = hea_file.name.split('.')[0], dat_file.name.split('.')[0]
-            if hb != db:
-                st.error("❌ 错误：文件名不匹配！")
-                return
+    # 执行分析逻辑
+    if target_record:
+        with st.spinner(f'正在对 {target_record} 进行生理信号深度分析...'):
+            try:
+                import wfdb
+                path_to_read = os.path.join(target_dir, target_record)
+                record = wfdb.rdrecord(path_to_read)
+                
+                # 自动识别 EEG 通道
+                eeg_idx = 1
+                for i, name in enumerate(record.sig_name):
+                    if 'EEG' in name.upper(): eeg_idx = i; break
+                
+                signal, fs = record.p_signal[:, eeg_idx], record.fs
+                el = int(30 * fs)
+                epochs = [signal[i:i + el] for i in range(0, len(signal) - el, el)]
+                X_f = extract_paper_features(epochs, fs=fs, n_components=Config.N_COMPONENTS)
+                y_pred = model.predict(X_f)
+                score, advice = calculate_sleep_score(y_pred)
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                with open(os.path.join(tmpdir, hea_file.name), "wb") as f:
-                    f.write(hea_file.getbuffer())
-                with open(os.path.join(tmpdir, dat_file.name), "wb") as f:
-                    f.write(dat_file.getbuffer())
+                st.session_state.analysis_results = {
+                    'y_pred': y_pred, 'epochs': epochs, 'score': score, 
+                    'advice': advice, 'hb': target_record,
+                    'stage_map': {0:'Wake', 1:'S1', 2:'S2', 3:'S3', 4:'S4', 5:'REM'}
+                }
+            except Exception as e:
+                st.error(f"分析出错: {e}")
 
-                with st.spinner('正在进行生理信号深度分析...'):
-                    try:
-                        record = wfdb.rdrecord(os.path.join(tmpdir, hb))
-                        eeg_idx = 1
-                        for i, name in enumerate(record.sig_name):
-                            if 'EEG' in name.upper(): eeg_idx = i; break
-
-                        signal, fs = record.p_signal[:, eeg_idx], record.fs
-                        el = int(30 * fs)
-                        epochs = [signal[i:i + el] for i in range(0, len(signal) - el, el)]
-                        X_f = extract_paper_features(epochs, fs=fs, n_components=Config.N_COMPONENTS)
-                        y_pred = model.predict(X_f)
-                        score, advice = calculate_sleep_score(y_pred)
-
-                        st.session_state.analysis_results = {
-                            'y_pred': y_pred, 'epochs': epochs, 'score': score,
-                            'advice': advice, 'hb': hb,
-                            'stage_map': {0: 'Wake', 1: 'S1', 2: 'S2', 3: 'S3', 4: 'S4', 5: 'REM'}
-                        }
-                    except Exception as e:
-                        st.error(f"分析出错: {e}")
+    # 下面的渲染逻辑保持不变...
+    if st.session_state.analysis_results:
+        res = st.session_state.analysis_results
+        # ... 这里接你之前 app.py 里的可视化渲染代码 ...
 
     # --- 渲染分析结果 ---
     if st.session_state.analysis_results:
